@@ -478,15 +478,21 @@ services:
 | **audit** | `cargo install cargo-audit && cargo audit` |
 | **fmt** | `cargo fmt --all --check` |
 | **clippy** | Build frontend, then `cargo clippy --workspace --all-targets` |
-| **build-frontend** | `trunk build` |
-| **build-backend** | Build frontend, then `cargo build -p backend` |
 | **test** | Build frontend, then `cargo test --workspace` |
 
-Clippy, backend build, and test all **build the frontend first** because `rust-embed` needs `frontend/dist/` to exist at compile time.
+Clippy and test both **build the frontend first** because `rust-embed` needs `frontend/dist/` to exist at compile time.
 
-**container.yml** builds and pushes the Docker image to GHCR:
-- On PR: build only (no push)
-- On merge to main: build + push with `latest` and git SHA tags
+**container.yml** builds a release binary and Docker image on every push/PR to main:
+
+| Job | What it does |
+|-----|-------------|
+| **build-release** | `trunk build --release` + `cargo build --release -p backend`, uploads binary as artifact |
+| **container** | Downloads binary, builds Docker image with buildx layer caching |
+
+- On PR: container builds but does **not** push (validates the image)
+- On merge to main: pushes to GHCR with `latest` and git SHA tags
+- Docker layer caching via `cache-from: type=gha` / `cache-to: type=gha,mode=max` avoids rebuilding unchanged layers
+- Release binary is uploaded as an artifact (`backend-linux-x86_64`) so the container job doesn't recompile
 
 ---
 
