@@ -496,6 +496,58 @@ Clippy and test both **build the frontend first** because `rust-embed` needs `fr
 
 ---
 
+## Pattern 9: Branch Protection + Automerge Setup
+
+Run these once after creating the repo to enforce required checks and squash-only merges.
+
+**Restrict merge strategies to squash only and enable automerge:**
+
+```sh
+gh repo edit \
+  --enable-squash-merge \
+  --disable-merge-commit \
+  --disable-rebase-merge \
+  --enable-auto-merge \
+  --delete-branch-on-merge
+```
+
+**Require all CI checks to pass before merging to main:**
+
+```sh
+gh api repos/{owner}/{repo}/branches/main/protection \
+  --method PUT \
+  --input - <<'EOF'
+{
+  "required_status_checks": {
+    "strict": false,
+    "contexts": [
+      "Lint Checks",
+      "Security Audit",
+      "Rustfmt",
+      "Clippy",
+      "Tests",
+      "Build Release Binary",
+      "Build Container"
+    ]
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": null,
+  "restrictions": null,
+  "required_linear_history": true
+}
+EOF
+```
+
+`strict: false` means PRs don't need to be up-to-date with main before merging (avoids a rebase treadmill on busy repos). `required_linear_history: true` enforces squash commits at the branch level as a backstop.
+
+**Enable automerge on a specific PR** (once all checks are green it merges automatically):
+
+```sh
+gh pr merge --auto --squash <PR-number>
+```
+
+---
+
 ## Stack Reference
 
 | Layer | Crate | Version |
