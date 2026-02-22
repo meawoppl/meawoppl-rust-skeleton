@@ -1,12 +1,24 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use ws_bridge::WsEndpoint;
 
-/// WebSocket message protocol shared between backend and frontend.
-///
-/// Uses serde tagged enum so messages serialize as `{"type": "Variant", ...}`.
+// ---------------------------------------------------------------------------
+// WebSocket endpoint definition — single source of truth for server + client
+// ---------------------------------------------------------------------------
+
+/// The main application WebSocket endpoint.
+pub struct AppSocket;
+
+impl WsEndpoint for AppSocket {
+    const PATH: &'static str = "/ws";
+    type ServerMsg = ServerMsg;
+    type ClientMsg = ClientMsg;
+}
+
+/// Messages sent from the server to the client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum WsMessage {
+pub enum ServerMsg {
     /// Heartbeat to keep connection alive
     Heartbeat,
 
@@ -19,6 +31,18 @@ pub enum WsMessage {
         reconnect_delay_ms: u64,
     },
 }
+
+/// Messages sent from the client to the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ClientMsg {
+    /// Ping — server should respond with Heartbeat
+    Ping,
+}
+
+// ---------------------------------------------------------------------------
+// HTTP API types
+// ---------------------------------------------------------------------------
 
 /// Health check response from `/api/health`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,41 +64,45 @@ pub struct CreateItemRequest {
     pub name: String,
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn ws_message_heartbeat_roundtrip() {
-        let msg = WsMessage::Heartbeat;
+    fn server_msg_heartbeat_roundtrip() {
+        let msg = ServerMsg::Heartbeat;
         let json = serde_json::to_string(&msg).unwrap();
-        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, WsMessage::Heartbeat));
+        let parsed: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ServerMsg::Heartbeat));
     }
 
     #[test]
-    fn ws_message_error_roundtrip() {
-        let msg = WsMessage::Error {
+    fn server_msg_error_roundtrip() {
+        let msg = ServerMsg::Error {
             message: "something broke".to_string(),
         };
         let json = serde_json::to_string(&msg).unwrap();
-        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        let parsed: ServerMsg = serde_json::from_str(&json).unwrap();
         match parsed {
-            WsMessage::Error { message } => assert_eq!(message, "something broke"),
+            ServerMsg::Error { message } => assert_eq!(message, "something broke"),
             _ => panic!("Wrong variant"),
         }
     }
 
     #[test]
-    fn ws_message_shutdown_roundtrip() {
-        let msg = WsMessage::ServerShutdown {
+    fn server_msg_shutdown_roundtrip() {
+        let msg = ServerMsg::ServerShutdown {
             reason: "restarting".to_string(),
             reconnect_delay_ms: 1000,
         };
         let json = serde_json::to_string(&msg).unwrap();
-        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        let parsed: ServerMsg = serde_json::from_str(&json).unwrap();
         match parsed {
-            WsMessage::ServerShutdown {
+            ServerMsg::ServerShutdown {
                 reason,
                 reconnect_delay_ms,
             } => {
@@ -83,6 +111,14 @@ mod tests {
             }
             _ => panic!("Wrong variant"),
         }
+    }
+
+    #[test]
+    fn client_msg_ping_roundtrip() {
+        let msg = ClientMsg::Ping;
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ClientMsg::Ping));
     }
 
     #[test]

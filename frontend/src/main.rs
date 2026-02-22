@@ -1,5 +1,7 @@
 use gloo_net::http::Request;
-use shared::HealthResponse;
+use gloo_timers::future::sleep;
+use shared::{AppSocket, ClientMsg, HealthResponse, ServerMsg};
+use std::time::Duration;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 use yew_router::prelude::*;
@@ -32,7 +34,10 @@ pub fn app() -> Html {
 #[function_component(Home)]
 fn home() -> Html {
     let health = use_state(|| None::<String>);
+    let ws_status = use_state(|| "Connecting...".to_string());
+    let ws_messages = use_state(Vec::<String>::new);
 
+    // Health check via HTTP
     {
         let health = health.clone();
         use_effect_with((), move |_| {
@@ -49,6 +54,64 @@ fn home() -> Html {
         });
     }
 
+    // WebSocket connection via ws-bridge
+    {
+        let ws_status = ws_status.clone();
+        let ws_messages = ws_messages.clone();
+        use_effect_with((), move |_| {
+            match ws_bridge::yew_client::connect::<AppSocket>() {
+                Ok(conn) => {
+                    ws_status.set("Connected".to_string());
+                    let (mut tx, mut rx) = conn.split();
+
+                    // Ping loop — sends a Ping every 5 seconds
+                    spawn_local(async move {
+                        loop {
+                            sleep(Duration::from_secs(5)).await;
+                            if tx.send(ClientMsg::Ping).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+
+                    // Receive loop — updates UI state on each message
+                    let msgs = ws_messages;
+                    let status = ws_status;
+                    spawn_local(async move {
+                        while let Some(result) = rx.recv().await {
+                            match result {
+                                Ok(ServerMsg::Heartbeat) => {
+                                    let mut current = (*msgs).clone();
+                                    current.push("Received: Heartbeat".to_string());
+                                    if current.len() > 10 {
+                                        current.drain(..current.len() - 10);
+                                    }
+                                    msgs.set(current);
+                                }
+                                Ok(ServerMsg::Error { message }) => {
+                                    let mut current = (*msgs).clone();
+                                    current.push(format!("Received: Error — {}", message));
+                                    msgs.set(current);
+                                }
+                                Ok(ServerMsg::ServerShutdown { reason, .. }) => {
+                                    status.set(format!("Server shutting down: {}", reason));
+                                    break;
+                                }
+                                Err(e) => {
+                                    status.set(format!("WebSocket error: {}", e));
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    ws_status.set(format!("Connect failed: {}", e));
+                }
+            }
+        });
+    }
+
     html! {
         <div>
             <h1>{ "App" }</h1>
@@ -57,6 +120,15 @@ fn home() -> Html {
                     Some(s) => format!("Backend: {}", s),
                     None => "Checking backend...".to_string(),
                 }}
+            </div>
+            <div class="ws-status">
+                { format!("WebSocket: {}", *ws_status) }
+            </div>
+            <div class="ws-messages">
+                <h3>{ "WebSocket messages" }</h3>
+                <ul>
+                    { for (*ws_messages).iter().map(|m| html! { <li>{ m }</li> }) }
+                </ul>
             </div>
         </div>
     }

@@ -31,8 +31,8 @@ dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# WebSocket support (SinkExt/StreamExt for split send/receive)
-futures-util = "0.3"
+# WebSocket (typed via ws-bridge)
+ws-bridge = { version = "0.1", features = ["server"] }
 
 # Utilities
 anyhow = "1"
