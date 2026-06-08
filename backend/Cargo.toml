@@ -12,8 +12,8 @@ tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 tower-cookies = "0.10"
 
 # Database
-diesel = { version = "2.2", features = ["postgres", "r2d2", "uuid", "chrono"] }
-diesel_migrations = "2.2"
+diesel = { version = "2.3.8", features = ["postgres", "r2d2", "uuid", "chrono"] }
+diesel_migrations = "2.3.1"
 
 # Embedded frontend assets
 rust-embed = "8"

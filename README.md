@@ -2,7 +2,7 @@
 
 Template for full-stack Rust web applications with a Yew WASM frontend embedded into an Axum backend as a single binary.
 
-Patterns extracted from [cc-proxy](https://github.com/meawoppl/cc-proxy) and [inboxnegative.com](https://github.com/meawoppl/inboxnegative.com).
+Patterns extracted from [agent-portal](https://github.com/meawoppl/agent-portal) and [inboxnegative.com](https://github.com/meawoppl/inboxnegative.com).
 
 ## Architecture
 
