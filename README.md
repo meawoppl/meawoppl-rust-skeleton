@@ -15,11 +15,11 @@ Cargo.toml                        # Workspace root (backend, frontend, shared)
 │   └── src/main.rs               # Yew App with routing
 ├── backend/
 │   ├── src/
-│   │   ├── main.rs               # Axum server, routes, shutdown
+│   │   ├── main.rs               # Axum server: build_app(), shutdown, tests
+│   │   ├── config.rs             # Config::from_env() with logged defaults
 │   │   ├── db.rs                 # Diesel pool + embedded migrations
 │   │   ├── models.rs             # Queryable/Insertable structs
 │   │   ├── schema.rs             # Diesel generated schema
-│   │   ├── embedded_assets.rs    # rust-embed SPA serving
 │   │   └── handlers/
 │   │       ├── health.rs         # GET /api/health
 │   │       └── websocket.rs      # ws-bridge typed WebSocket
@@ -46,7 +46,7 @@ docker compose up db -d
 # Copy env
 cp .env.example .env
 
-# Build frontend (must happen before backend due to rust-embed)
+# Build frontend (must happen before backend; memory-serve embeds frontend/dist)
 cd frontend && trunk build && cd ..
 
 # Run
@@ -127,53 +127,43 @@ To add a new message type: add a variant to `ServerMsg` or `ClientMsg`, add a ro
 
 ---
 
-## Pattern 2: Frontend Embedding (`backend/src/embedded_assets.rs`)
+## Pattern 2: Frontend Embedding with `memory-serve`
 
-Trunk compiles the Yew frontend to `frontend/dist/`. The backend uses `rust-embed` to bake those files into the binary at compile time:
+Trunk compiles the Yew frontend to `frontend/dist/`. The backend uses
+[`memory-serve`](https://crates.io/crates/memory-serve) to bake those files into
+the binary at compile time and serve them as an axum router. Over a hand-rolled
+embed it adds, for free: **brotli/gzip pre-compression** (a big win for the
+`.wasm` payload), content negotiation on `Accept-Encoding`, `ETag`/`304`
+handling, and per-type cache-control. See `CLAUDE.md` for the crate note.
 
-```rust
-#[derive(RustEmbed)]
-#[folder = "../frontend/dist"]
-pub struct FrontendAssets;
-```
-
-The serve function handles both static assets and SPA fallback (unknown paths return `index.html` so client-side routing works):
-
-```rust
-pub async fn serve_embedded_frontend(uri: Uri) -> Response {
-    let path = uri.path().trim_start_matches('/');
-    let path = if path.is_empty() { "index.html" } else { path };
-
-    match FrontendAssets::get(path) {
-        Some(content) => {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
-            (StatusCode::OK, [(header::CONTENT_TYPE, mime.as_ref())],
-             Body::from(content.data.to_vec())).into_response()
-        }
-        None => {
-            // SPA fallback: any unknown path -> index.html
-            match FrontendAssets::get("index.html") {
-                Some(content) => (StatusCode::OK, [(header::CONTENT_TYPE, "text/html")],
-                     Body::from(content.data.to_vec())).into_response(),
-                None => (StatusCode::NOT_FOUND, "Frontend not found").into_response(),
-            }
-        }
-    }
-}
-```
-
-Wired into the router as a fallback so `/api/*` routes take priority:
+The frontend router is built inside `build_app()` and merged so `/api/*` and
+`/ws` take priority, with an SPA fallback to `index.html` for client-side
+routes:
 
 ```rust
-let app = Router::new()
+let frontend = MemoryServe::new(load_assets!("../frontend/dist"))
+    .index_file(Some("/index.html"))
+    .fallback(Some("/index.html"))      // SPA: unknown paths -> index.html
+    .fallback_status(StatusCode::OK)
+    .html_cache_control(CacheControl::NoCache)  // always re-validate index.html
+    .cache_control(CacheControl::Long)          // hashed assets are immutable
+    .into_router();
+
+Router::new()
     .route("/api/health", get(handlers::health::health))
-    .route("/ws", get(handlers::websocket::ws_handler))
-    .with_state(app_state)
-    .fallback(axum::routing::get(embedded_assets::serve_embedded_frontend))
-    .layer(cors);
+    .with_state(state)
+    .route(shared::AppSocket::PATH, handlers::websocket::handler())
+    .merge(frontend)
+    .layer(cors)
 ```
 
-The result is a **single binary** with no external file dependencies. `frontend/dist/` is not needed at runtime.
+The result is a **single binary** with no external file dependencies —
+`frontend/dist/` is only needed at build time. Compression is applied in release
+builds; debug builds serve assets uncompressed for fast iteration.
+
+> **Note:** `memory-serve` 0.6.x is the axum-0.7 compatible line (2.x needs axum
+> 0.8+). Its transitive `brotli` 6 requires pinning `alloc-stdlib = "=0.2.2"` —
+> see the comment in `backend/Cargo.toml`.
 
 ---
 
@@ -360,7 +350,11 @@ enum Route {
 
 ## Pattern 6: Axum Server Setup (`backend/src/main.rs`)
 
-Server startup follows a consistent sequence: parse args, init tracing, load env, create DB pool, run migrations, build router, serve with graceful shutdown.
+The router is built by a pure `build_app(state) -> Router` function, kept
+separate from `main()` so tests can drive the whole app in-process with
+`tower::ServiceExt::oneshot` — no bound port, no network. Startup is then a
+consistent sequence: parse args, init tracing, load env + `Config::from_env()`,
+create DB pool, run migrations, `build_app`, serve with graceful shutdown.
 
 ```rust
 #[derive(Parser, Debug, Clone)]
@@ -375,6 +369,24 @@ pub struct AppState {
     pub db_pool: DbPool,
 }
 
+pub fn build_app(state: Arc<AppState>) -> Router {
+    let frontend = MemoryServe::new(load_assets!("../frontend/dist"))
+        .index_file(Some("/index.html"))
+        .fallback(Some("/index.html"))
+        .fallback_status(StatusCode::OK)
+        .html_cache_control(CacheControl::NoCache)
+        .cache_control(CacheControl::Long)
+        .into_router();
+
+    Router::new()
+        .route("/api/health", get(handlers::health::health))
+        .with_state(state)
+        // ws-bridge handler returns MethodRouter<()>, add after .with_state()
+        .route(shared::AppSocket::PATH, handlers::websocket::handler())
+        .merge(frontend)
+        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -387,26 +399,26 @@ async fn main() -> anyhow::Result<()> {
 
     dotenvy::dotenv().ok();
 
+    let config = Config::from_env();
+
     let pool = db::create_pool()?;
     db::run_migrations(&pool)?;
 
     let app_state = Arc::new(AppState { dev_mode: args.dev_mode, db_pool: pool });
+    let app = build_app(app_state);
 
-    let app = Router::new()
-        .route("/api/health", get(handlers::health::health))
-        .with_state(app_state)
-        // ws-bridge handler returns MethodRouter<()>, add after .with_state()
-        .route(shared::AppSocket::PATH, handlers::websocket::handler())
-        .fallback(axum::routing::get(embedded_assets::serve_embedded_frontend))
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any));
-
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    let listener = tokio::net::TcpListener::bind(config.bind_addr()).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
 }
 ```
+
+The matching in-process tests (see `backend/src/main.rs`) build a non-connecting
+DB pool with `Pool::builder().build_unchecked(...)` so routes that don't touch
+the database — health, asset serving, SPA fallback — can be exercised without a
+running Postgres.
 
 Graceful shutdown handles both SIGTERM (Docker/k8s) and Ctrl+C:
 
@@ -480,7 +492,7 @@ services:
 | **clippy** | Build frontend, then `cargo clippy --workspace --all-targets` |
 | **test** | Build frontend, then `cargo test --workspace` |
 
-Clippy and test both **build the frontend first** because `rust-embed` needs `frontend/dist/` to exist at compile time.
+Clippy and test both **build the frontend first** because `memory-serve`'s `load_assets!` needs `frontend/dist/` to exist at compile time. Cargo commands run with `--locked` so builds respect the committed `Cargo.lock`.
 
 **container.yml** builds a release binary and Docker image on every push/PR to main:
 
@@ -556,7 +568,7 @@ gh pr merge --auto --squash <PR-number>
 | Async runtime | `tokio` | 1 (full) |
 | Frontend | `yew` | 0.21 (CSR) |
 | WASM bundler | `trunk` | CLI tool |
-| Asset embedding | `rust-embed` | 8 |
+| Asset embedding | `memory-serve` | 0.6 (brotli/gzip, ETag) |
 | Database | `diesel` | 2.2 (postgres, r2d2) |
 | Typed WebSockets | `ws-bridge` | 0.1 (server + yew-client) |
 | Serialization | `serde` + `serde_json` | 1 |
