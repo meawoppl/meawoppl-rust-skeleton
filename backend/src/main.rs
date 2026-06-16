@@ -1,13 +1,16 @@
+mod config;
 mod db;
-mod embedded_assets;
 mod handlers;
 mod models;
 mod schema;
 
+use crate::config::Config;
 use crate::db::DbPool;
+use axum::http::StatusCode;
 use axum::{routing::get, Router};
 use clap::Parser;
-use std::{env, sync::Arc};
+use memory_serve::{load_assets, CacheControl, MemoryServe};
+use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use ws_bridge::WsEndpoint;
@@ -25,6 +28,35 @@ struct Args {
 pub struct AppState {
     pub dev_mode: bool,
     pub db_pool: DbPool,
+}
+
+/// Build the full application router from shared state.
+///
+/// Kept as a pure function of `AppState` so tests can drive the entire app
+/// in-process via `tower::ServiceExt::oneshot` — no bound port, no network.
+pub fn build_app(state: Arc<AppState>) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    // Pre-compressed (brotli/gzip), content-negotiated frontend assets with
+    // ETag/304 and an SPA fallback to index.html. Assets are embedded at build
+    // time in release builds and read from disk in debug builds.
+    let frontend = MemoryServe::new(load_assets!("../frontend/dist"))
+        .index_file(Some("/index.html"))
+        .fallback(Some("/index.html"))
+        .fallback_status(StatusCode::OK)
+        .html_cache_control(CacheControl::NoCache)
+        .cache_control(CacheControl::Long)
+        .into_router();
+
+    Router::new()
+        .route("/api/health", get(handlers::health::health))
+        .with_state(state)
+        .route(shared::AppSocket::PATH, handlers::websocket::handler())
+        .merge(frontend)
+        .layer(cors)
 }
 
 #[tokio::main]
@@ -46,6 +78,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Load .env file if present
     dotenvy::dotenv().ok();
+
+    let config = Config::from_env();
 
     // Create database pool and run migrations
     let pool = db::create_pool()?;
@@ -72,26 +106,10 @@ async fn main() -> anyhow::Result<()> {
         db_pool: pool,
     });
 
-    // CORS
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-
-    // Router
-    let app = Router::new()
-        .route("/api/health", get(handlers::health::health))
-        .with_state(app_state)
-        .route(shared::AppSocket::PATH, handlers::websocket::handler())
-        .fallback(axum::routing::get(embedded_assets::serve_embedded_frontend))
-        .layer(cors);
+    let app = build_app(app_state);
 
     // Bind and serve
-    let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
-    let addr = format!("{}:{}", host, port);
-
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = tokio::net::TcpListener::bind(config.bind_addr()).await?;
     tracing::info!("Listening on {}", listener.local_addr()?);
 
     axum::serve(listener, app)
@@ -122,5 +140,79 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => tracing::info!("Received Ctrl+C, shutting down..."),
         _ = terminate => tracing::info!("Received SIGTERM, shutting down..."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use diesel::pg::PgConnection;
+    use diesel::r2d2::{ConnectionManager, Pool};
+    use tower::ServiceExt;
+
+    /// State with a pool that is never actually connected. The health and asset
+    /// routes don't touch the database, so `build_unchecked` lets us exercise
+    /// the whole router without a running Postgres.
+    fn test_state() -> Arc<AppState> {
+        let manager = ConnectionManager::<PgConnection>::new("postgres://invalid/db");
+        let db_pool = Pool::builder().build_unchecked(manager);
+        Arc::new(AppState {
+            dev_mode: true,
+            db_pool,
+        })
+    }
+
+    #[tokio::test]
+    async fn health_returns_ok_json() {
+        let resp = build_app(test_state())
+            .oneshot(Request::get("/api/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("json"), "expected JSON, got {ct}");
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: shared::HealthResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed.status, "ok");
+    }
+
+    #[tokio::test]
+    async fn index_served_as_html() {
+        let resp = build_app(test_state())
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("html"), "expected HTML, got {ct}");
+    }
+
+    #[tokio::test]
+    async fn unknown_path_falls_back_to_index() {
+        // SPA fallback: any unmatched path serves index.html with 200.
+        let resp = build_app(test_state())
+            .oneshot(
+                Request::get("/some/client/route")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

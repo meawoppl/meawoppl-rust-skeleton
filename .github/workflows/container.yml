@@ -34,7 +34,7 @@ jobs:
         run: cd frontend && trunk build --release
 
       - name: Build backend (release, embeds frontend assets)
-        run: cargo build --release -p backend
+        run: cargo build --release --locked -p backend
 
       - name: Upload release binary
         uses: actions/upload-artifact@v4
