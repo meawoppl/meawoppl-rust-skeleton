@@ -165,6 +165,28 @@ builds; debug builds serve assets uncompressed for fast iteration.
 > 0.8+). Its transitive `brotli` 6 requires pinning `alloc-stdlib = "=0.2.2"` —
 > see the comment in `backend/Cargo.toml`.
 
+### Why `CacheControl::Long` is safe: filehash + SRI move together
+
+The `.cache_control(CacheControl::Long)` above marks every non-HTML asset `immutable, max-age=31536000` — the browser may reuse it for a year without revalidating. That is only safe because of two things a `trunk build --release` does **by default**:
+
+- **Content-hashed filenames** (`filehash`, *on by default*): `style.css` → `style-c6dc982939a540ca.css`. The hash — and therefore the URL — changes whenever the content does.
+- **Subresource Integrity** baked into `index.html`: `<link href="/style-….css" integrity="sha384-…">`. The browser refuses to apply the asset unless its bytes hash to that digest.
+
+`immutable` caching, hashed names, and SRI must move **together**. Break the hashing and you get a silent, miserable-to-diagnose failure:
+
+> Disable filehash (`--filehash false`) so the asset keeps a stable URL like `style.css`, and a returning browser keeps its year-old *immutable* copy. `index.html` is served `NoCache`, so it is always re-fetched and carries a *fresh* SRI digest — which no longer matches the stale cached bytes. The browser blocks the stylesheet and the page renders unstyled. No 404, nothing obvious in the network tab — just:
+>
+> ```
+> Failed to find a valid digest in the 'integrity' attribute for resource
+> '…/style.css' with computed SHA-384 integrity '…'. The resource has been blocked.
+> ```
+
+**Rules:**
+
+1. **Never disable `filehash`** while assets are served `immutable` and SRI is on — hashed names are exactly what make immutable caching correct.
+2. Keep `index.html` on `NoCache` (as above) so a redeploy is always picked up; the hashed assets it points at are re-fetched because their URLs changed.
+3. If you ever need stable asset names, drop *both* `CacheControl::Long` and SRI — pick one consistency mechanism, not two that can silently disagree.
+
 ---
 
 ## Pattern 3: Typed WebSockets with ws-bridge (`backend/src/handlers/websocket.rs`)
