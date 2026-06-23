@@ -578,3 +578,9 @@ gh pr merge --auto --squash <PR-number>
 | HTTP middleware | `tower-http` | 0.6 (cors) |
 | Cookies | `tower-cookies` | 0.10 |
 | Error handling | `anyhow` | 1 |
+
+---
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
