@@ -72,6 +72,24 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    // Log panics with their source location and a backtrace via tracing, so
+    // crashes are captured in structured logs rather than only on stderr.
+    // Set RUST_BACKTRACE=1 to populate the backtrace.
+    std::panic::set_hook(Box::new(|panic_info| {
+        let backtrace = std::backtrace::Backtrace::capture();
+        match panic_info.location() {
+            Some(loc) => tracing::error!(
+                "PANIC at {}:{}:{}: {}",
+                loc.file(),
+                loc.line(),
+                loc.column(),
+                panic_info
+            ),
+            None => tracing::error!("PANIC: {}", panic_info),
+        }
+        tracing::error!("Backtrace:\n{backtrace}");
+    }));
+
     if args.dev_mode {
         tracing::warn!("DEV MODE ENABLED");
     }
