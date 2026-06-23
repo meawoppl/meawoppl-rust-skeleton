@@ -2,6 +2,7 @@
 name = "frontend"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [dependencies]
 yew = { version = "0.21", features = ["csr"] }
