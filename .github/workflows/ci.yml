@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Run every 5 days to keep the Swatinem/rust-cache warm (caches expire
+    # after 7 days of inactivity).
+    - cron: '0 0 */5 * *'
 
 env:
   CARGO_TERM_COLOR: always
